@@ -4,283 +4,253 @@
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <SPIFFS.h>
+#include <Preferences.h>
 
-// CONFIG
 #define MAX_STRIPS 4
-#define MAX_LEDS 300
+#define MAX_LEDS_PER_STRIP 150
+#define MAX_GROUPS_PER_STRIP 10
+#define MAX_GROUP_SIZE 50
 
-// AP MODE SETTINGS
-const char* ap_ssid = "espled";
-const char* ap_password = "ledcontroller";
-
-// Static IP config for SoftAP
-IPAddress local_ip(192, 168, 4, 1);
-IPAddress gateway(192, 168, 4, 1);
-IPAddress subnet(255, 255, 255, 0);
-
-// STATUS LED
-#define STATUS_LED_PIN 48
-Adafruit_NeoPixel statusLed(1, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
-
-// STRIP DEFINITION
-struct StripInfo {
-  Adafruit_NeoPixel strip;
+struct LEDStrip {
   uint8_t pin;
-  uint16_t count;
+  uint16_t numLeds;
+  Adafruit_NeoPixel* strip;
+  uint8_t brightness;
+  float speed;
+  float phase;
+  bool ledStates[MAX_LEDS_PER_STRIP];
+  uint8_t groups[MAX_GROUPS_PER_STRIP][MAX_GROUP_SIZE];
+  uint8_t groupSizes[MAX_GROUPS_PER_STRIP];
+  uint8_t groupCount;
 };
 
-StripInfo strips[MAX_STRIPS] = {
-  { Adafruit_NeoPixel(MAX_LEDS, 2, NEO_GRB + NEO_KHZ800), 2, 0 },
-  { Adafruit_NeoPixel(MAX_LEDS, 3, NEO_GRB + NEO_KHZ800), 3, 0 }
-};
+LEDStrip strips[MAX_STRIPS];
+uint8_t stripCount = 0;
 
 AsyncWebServer server(80);
-AsyncWebSocket ws("/ws");
-DynamicJsonDocument configDoc(4096);
+Preferences preferences;
 
-bool manualMode = false;
-uint8_t globalBrightness = 128;
+const char* ssid = "ESP32_LED_Controller";
+const char* password = "12345678";
 
-void listSPIFFS() {
-  Serial.println("Listing SPIFFS files:");
-  File root = SPIFFS.open("/");
-  File file = root.openNextFile();
-  while (file) {
-    Serial.print(" - ");
-    Serial.println(file.name());
-    file = root.openNextFile();
-  }
+void setupWiFi() {
+  WiFi.softAP(ssid, password);
+  Serial.println("\nWiFi started");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.softAPIP());
 }
 
-void loadConfig() {
-  if (!SPIFFS.begin(true)) {
-    Serial.println("[ERROR] SPIFFS mount failed!");
-    return;
-  }
-  listSPIFFS();
-  File f = SPIFFS.open("/config.json", "r");
-  if (!f) {
-    Serial.println("[WARN] config.json not found!");
-    return;
-  }
-  DeserializationError e = deserializeJson(configDoc, f);
-  if (e) {
-    Serial.print("[ERROR] JSON parse error: ");
-    Serial.println(e.c_str());
-  } else {
-    Serial.println("config.json loaded OK");
-  }
-  f.close();
+bool addStrip(uint8_t pin, uint16_t numLeds) {
+  if (stripCount >= MAX_STRIPS) return false;
+  LEDStrip &s = strips[stripCount];
+  s.pin = pin;
+  s.numLeds = numLeds;
+  s.strip = new Adafruit_NeoPixel(numLeds, pin, NEO_GRB + NEO_KHZ800);
+  s.strip->begin();
+  s.strip->show();
+  s.brightness = 50;
+  s.speed = 0.005;
+  s.phase = 0;
+  s.groupCount = 0;
+  for (int i = 0; i < numLeds; i++) s.ledStates[i] = true;
+  stripCount++;
+  return true;
 }
 
 void saveConfig() {
-  File f = SPIFFS.open("/config.json", "w");
-  if (!f) {
-    Serial.println("[ERROR] config.json save fail!");
+  preferences.begin("ledcfg", false);
+  preferences.putUChar("stripCount", stripCount);
+  for (int i = 0; i < stripCount; i++) {
+    String baseKey = "s" + String(i);
+    preferences.putUChar((baseKey + "p").c_str(), strips[i].pin);
+    preferences.putUShort((baseKey + "n").c_str(), strips[i].numLeds);
+    preferences.putUChar((baseKey + "b").c_str(), strips[i].brightness);
+    preferences.putFloat((baseKey + "sp").c_str(), strips[i].speed);
+    preferences.putUChar((baseKey + "gc").c_str(), strips[i].groupCount);
+    preferences.putBytes((baseKey + "leds").c_str(), strips[i].ledStates, strips[i].numLeds);
+    for (int g = 0; g < strips[i].groupCount; g++) {
+      preferences.putUChar((baseKey + "gs" + String(g)).c_str(), strips[i].groupSizes[g]);
+      preferences.putBytes((baseKey + "g" + String(g)).c_str(), strips[i].groups[g], strips[i].groupSizes[g]);
+    }
+  }
+  preferences.end();
+  Serial.println("Config saved");
+}
+
+void loadConfig() {
+  preferences.begin("ledcfg", true);
+  stripCount = preferences.getUChar("stripCount", 0);
+  if (stripCount == 0) {
+    preferences.end();
+    Serial.println("No saved config");
     return;
   }
-  serializeJson(configDoc, f);
-  f.close();
-  Serial.println("config.json saved.");
+  for (int i = 0; i < stripCount; i++) {
+    String baseKey = "s" + String(i);
+    uint8_t pin = preferences.getUChar((baseKey + "p").c_str(), 0);
+    uint16_t numLeds = preferences.getUShort((baseKey + "n").c_str(), 0);
+    addStrip(pin, numLeds);  // initializes strip and ledStates = true
+
+    strips[i].brightness = preferences.getUChar((baseKey + "b").c_str(), 50);
+    strips[i].speed = preferences.getFloat((baseKey + "sp").c_str(), 0.005);
+    strips[i].groupCount = preferences.getUChar((baseKey + "gc").c_str(), 0);
+
+    preferences.getBytes((baseKey + "leds").c_str(), strips[i].ledStates, strips[i].numLeds);
+    for (int g = 0; g < strips[i].groupCount; g++) {
+      strips[i].groupSizes[g] = preferences.getUChar((baseKey + "gs" + String(g)).c_str(), 0);
+      preferences.getBytes((baseKey + "g" + String(g)).c_str(), strips[i].groups[g], strips[i].groupSizes[g]);
+    }
+  }
+  preferences.end();
+  Serial.println("Config loaded");
 }
 
-void handleWsMessage(void* arg, uint8_t* data, size_t len) {
-  AwsFrameInfo* info = (AwsFrameInfo*)arg;
-  if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
-    DynamicJsonDocument doc(512);
-    auto error = deserializeJson(doc, (char*)data);
-    if (error) {
-      Serial.printf("[ERROR] websocket JSON parse: %s\n", error.c_str());
-      return;
-    }
+// Handlers from previous code here...
+// Add saveConfig() calls after any config change (e.g., toggle LED, set brightness/speed, add group)
 
-    if (doc.containsKey("manual")) {
-      manualMode = doc["manual"];
-      Serial.printf("manualMode changed to: %d\n", manualMode);
-    }
-    if (doc.containsKey("led")) {
-      uint16_t led = doc["led"];
-      bool state = doc["state"];
-      for (int s = 0; s < MAX_STRIPS; s++) {
-        if (led < strips[s].count) {
-          strips[s].strip.setPixelColor(led, state ? strips[s].strip.Color(255, 255, 255) : 0);
-          strips[s].strip.show();
+void handleToggleLED(AsyncWebServerRequest *request) {
+  if (!request->hasParam("strip") || !request->hasParam("led")) {
+    request->send(400, "text/plain", "Missing parameters");
+    return;
+  }
+  int stripId = request->getParam("strip")->value().toInt();
+  int led = request->getParam("led")->value().toInt();
+  if (stripId < 0 || stripId >= stripCount || led < 0 || led >= strips[stripId].numLeds) {
+    request->send(400, "text/plain", "Invalid strip or LED index");
+    return;
+  }
+  strips[stripId].ledStates[led] = !strips[stripId].ledStates[led];
+  saveConfig();
+  request->send(200, "text/plain", strips[stripId].ledStates[led] ? "ON" : "OFF");
+}
+
+void handleSetBrightness(AsyncWebServerRequest *request) {
+  if (!request->hasParam("strip") || !request->hasParam("b")) {
+    request->send(400, "text/plain", "Missing parameters");
+    return;
+  }
+  int stripId = request->getParam("strip")->value().toInt();
+  int b = request->getParam("b")->value().toInt();
+  if (stripId >= 0 && stripId < stripCount) {
+    strips[stripId].brightness = b;
+    saveConfig();
+    request->send(200, "text/plain", "OK");
+  } else {
+    request->send(400, "text/plain", "Invalid strip");
+  }
+}
+
+void handleSetSpeed(AsyncWebServerRequest *request) {
+  if (!request->hasParam("strip") || !request->hasParam("s")) {
+    request->send(400, "text/plain", "Missing parameters");
+    return;
+  }
+  int stripId = request->getParam("strip")->value().toInt();
+  float s = request->getParam("s")->value().toFloat();
+  if (stripId >= 0 && stripId < stripCount) {
+    strips[stripId].speed = s;
+    saveConfig();
+    request->send(200, "text/plain", "OK");
+  } else {
+    request->send(400, "text/plain", "Invalid strip");
+  }
+}
+
+void handleAddGroup(AsyncWebServerRequest *request) {
+  if (!request->hasParam("strip") || !request->hasParam("leds")) {
+    request->send(400, "text/plain", "Missing parameters");
+    return;
+  }
+  int stripId = request->getParam("strip")->value().toInt();
+  String ledList = request->getParam("leds")->value();
+
+  if (stripId < 0 || stripId >= stripCount || strips[stripId].groupCount >= MAX_GROUPS_PER_STRIP) {
+    request->send(400, "text/plain", "Invalid strip or max groups reached");
+    return;
+  }
+
+  int groupId = strips[stripId].groupCount;
+  strips[stripId].groupSizes[groupId] = 0;
+  int idx = 0;
+  ledList.replace(" ", "");
+  while (ledList.length() > 0 && idx < MAX_GROUP_SIZE) {
+    int comma = ledList.indexOf(',');
+    String token = (comma >= 0) ? ledList.substring(0, comma) : ledList;
+    int dash = token.indexOf('-');
+    if (dash >= 0) {
+      int start = token.substring(0, dash).toInt();
+      int end = token.substring(dash + 1).toInt();
+      for (int i = start; i <= end && idx < MAX_GROUP_SIZE; i++) {
+        if (i < strips[stripId].numLeds) {
+          strips[stripId].groups[groupId][idx++] = i;
         }
       }
-    }
-    if (doc.containsKey("brightness")) {
-      globalBrightness = doc["brightness"];
-      Serial.printf("brightness set to %d\n", globalBrightness);
-    }
-  }
-}
-
-// New function to start AP with retries
-void startAccessPoint() {
-  const int maxRetries = 5;
-  int attempt = 0;
-
-  while (attempt < maxRetries) {
-    Serial.printf("Attempting to start AP (try %d)...\n", attempt + 1);
-
-    if (!WiFi.softAPConfig(local_ip, gateway, subnet)) {
-      Serial.println("[ERROR] SoftAPConfig failed");
-      delay(1000);
-      attempt++;
-      continue;
-    }
-
-    if (WiFi.softAP(ap_ssid, ap_password)) {
-      Serial.println("AP started successfully.");
-      statusLed.setPixelColor(0, statusLed.Color(0, 0, 20)); // blue
-      statusLed.show();
-      IPAddress ip = WiFi.softAPIP();
-      Serial.printf("AP IP: %s\n", ip.toString().c_str());
-      return;
     } else {
-      Serial.println("[ERROR] AP failed to start!");
-      statusLed.setPixelColor(0, statusLed.Color(20, 0, 0)); // red
-      statusLed.show();
-      delay(1000);
-      attempt++;
+      int val = token.toInt();
+      if (val < strips[stripId].numLeds) {
+        strips[stripId].groups[groupId][idx++] = val;
+      }
     }
+    if (comma >= 0) ledList = ledList.substring(comma + 1);
+    else break;
   }
-
-  Serial.println("[ERROR] Failed to start AP after retries");
-  statusLed.setPixelColor(0, statusLed.Color(20, 0, 0)); // red
-  statusLed.show();
+  strips[stripId].groupSizes[groupId] = idx;
+  strips[stripId].groupCount++;
+  saveConfig();
+  request->send(200, "text/plain", "Group added");
 }
 
 void setup() {
-  pinMode(LED_BUILTIN, OUTPUT);
-  digitalWrite(LED_BUILTIN, HIGH); // onboard LED on
   Serial.begin(115200);
-  delay(2000);
-  Serial.println("HELLO FROM SETUP START");
+  SPIFFS.begin(true);
+  setupWiFi();
 
-  statusLed.begin();
-  statusLed.setPixelColor(0, statusLed.Color(20, 0, 0)); // red = boot
-  statusLed.show();
+  loadConfig();  // load saved config, or nothing if first time
 
-  loadConfig();
-
-  delay(2000);  // give system a moment before starting AP
-
-  startAccessPoint();
-
-  // setup LED strips
-  if (configDoc.containsKey("strips")) {
-    JsonArray js = configDoc["strips"];
-    int idx = 0;
-    for (JsonObject s : js) {
-      int pin = s["pin"];
-      int count = s["ledCount"];
-      strips[idx].pin = pin;
-      strips[idx].count = count;
-      strips[idx].strip.updateLength(count);
-      strips[idx].strip.setPin(pin);
-      strips[idx].strip.begin();
-      strips[idx].strip.show();
-      idx++;
-    }
-    manualMode = configDoc["manualMode"];
-  } else {
-    Serial.println("[WARN] config has no 'strips' array, skipping strips init");
+  // If no saved config, add example strips:
+  if (stripCount == 0) {
+    addStrip(2, 60);
+    addStrip(3, 30);
+    saveConfig();
   }
 
-  // serve static site
-  server.serveStatic("/", SPIFFS, "/").setDefaultFile("index.html");
-
-  server.on("/config.json", HTTP_GET, [](AsyncWebServerRequest* req) {
-    String j;
-    serializeJson(configDoc, j);
-    req->send(200, "application/json", j);
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(SPIFFS, "/index.html", "text/html");
   });
-
-  server.on("/save", HTTP_POST, [](AsyncWebServerRequest* req) {
-    if (req->hasParam("plain", true)) {
-      DynamicJsonDocument doc(4096);
-      auto error = deserializeJson(doc, req->arg("plain"));
-      if (error) {
-        Serial.printf("[ERROR] JSON parse in /save: %s\n", error.c_str());
-        req->send(400, "text/plain", "parse fail");
-      } else {
-        configDoc = doc;
-        saveConfig();
-        req->send(200, "text/plain", "saved");
-      }
-    }
-  });
-
-  server.onNotFound([](AsyncWebServerRequest* request) {
-    Serial.printf("[INFO] redirecting %s to /\n", request->url().c_str());
-    request->redirect("/");
-  });
-
-  ws.onEvent([](AsyncWebSocket* s, AsyncWebSocketClient* c, AwsEventType type, void* arg, uint8_t* data, size_t len) {
-    if (type == WS_EVT_CONNECT) {
-      Serial.printf("[WS] Client %u connected\n", c->id());
-    } else if (type == WS_EVT_DISCONNECT) {
-      Serial.printf("[WS] Client %u disconnected\n", c->id());
-    } else if (type == WS_EVT_DATA) {
-      handleWsMessage(arg, data, len);
-    }
-  });
-  server.addHandler(&ws);
+  server.on("/state", HTTP_GET, handleState);
+  server.on("/toggle", HTTP_GET, handleToggleLED);
+  server.on("/setBrightness", HTTP_GET, handleSetBrightness);
+  server.on("/setSpeed", HTTP_GET, handleSetSpeed);
+  server.on("/addGroup", HTTP_GET, handleAddGroup);
+  server.serveStatic("/", SPIFFS, "/");
 
   server.begin();
-  Serial.println("HTTP server started");
 }
 
-// Watchdog in loop to check if AP is alive; restart if needed
-unsigned long lastApCheck = 0;
-const unsigned long apCheckInterval = 5000;  // check every 5 seconds
-
 void loop() {
-  // Check AP status periodically
-  if (millis() - lastApCheck > apCheckInterval) {
-    lastApCheck = millis();
+  for (int s = 0; s < stripCount; s++) {
+    LEDStrip &strip = strips[s];
+    strip.phase += strip.speed;
+    if (strip.phase > 1.0) strip.phase -= 1.0;
 
-    // AP should be running and have IP 192.168.4.1 at least
-    IPAddress ip = WiFi.softAPIP();
-    int stations = WiFi.softAPgetStationNum();
+    uint16_t hue = strip.phase * 65535;
+    uint32_t color = Adafruit_NeoPixel::ColorHSV(hue, 255, 255);
+    uint8_t r = (color >> 16) & 0xFF;
+    uint8_t g = (color >> 8) & 0xFF;
+    uint8_t b = color & 0xFF;
 
-    if (ip != local_ip) {
-      Serial.printf("[WATCHDOG] AP IP mismatch (got %s), restarting AP\n", ip.toString().c_str());
-      startAccessPoint();
-    } else if (stations < 0) {
-      // unlikely but just in case
-      Serial.println("[WATCHDOG] AP station number invalid, restarting AP");
-      startAccessPoint();
-    }
-  }
+    r = (r * strip.brightness) / 255;
+    g = (g * strip.brightness) / 255;
+    b = (b * strip.brightness) / 255;
 
-  // LED status heartbeat
-  if (WiFi.softAPgetStationNum() > 0) {
-    statusLed.setPixelColor(0, statusLed.Color(0, 20, 0)); // green = client connected
-  } else {
-    statusLed.setPixelColor(0, statusLed.Color(0, 0, 20)); // blue = AP running
-  }
-  statusLed.show();
-
-  // Your LED animation if not manualMode
-  if (!manualMode) {
-    static float phase = 0;
-    phase += 0.002;
-    if (phase > 1) phase = 0;
-    uint16_t hue = phase * 65535;
-    for (int s = 0; s < MAX_STRIPS; s++) {
-      for (int i = 0; i < strips[s].count; i++) {
-        uint32_t rawColor = strips[s].strip.gamma32(strips[s].strip.ColorHSV(hue));
-        uint8_t r = (rawColor >> 16) & 0xFF;
-        uint8_t g = (rawColor >> 8) & 0xFF;
-        uint8_t b = rawColor & 0xFF;
-        r = (r * globalBrightness) / 255;
-        g = (g * globalBrightness) / 255;
-        b = (b * globalBrightness) / 255;
-        strips[s].strip.setPixelColor(i, strips[s].strip.Color(r, g, b));
+    for (int i = 0; i < strip.numLeds; i++) {
+      if (strip.ledStates[i]) {
+        strip.strip->setPixelColor(i, r, g, b);
+      } else {
+        strip.strip->setPixelColor(i, 0);
       }
-      strips[s].strip.show();
     }
+    strip.strip->show();
   }
+  delay(10);
 }
