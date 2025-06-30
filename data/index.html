@@ -1,49 +1,159 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>ESP32 LED Config Preview</title>
+  <meta charset="UTF-8">
+  <title>ESP32 LED Config</title>
   <style>
-    body { font-family: Arial, sans-serif; background: #111; color: #eee; padding: 20px; }
-    .led { display: inline-block; width: 20px; height: 20px; margin: 4px; border-radius: 50%; background: #333; }
-    .led.on { background: lime; }
-    .led.off { background: #222; border: 1px solid #555; }
+    body { background: #111; color: #eee; font-family: sans-serif; }
+    .led {
+      display: inline-block;
+      width: 40px;
+      height: 40px;
+      margin: 2px;
+      border-radius: 4px;
+      border: 1px solid #555;
+      text-align: center;
+      line-height: 40px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .on { border: 2px solid yellow; }
+    .controls button {
+      margin: 4px;
+      padding: 4px 8px;
+    }
   </style>
 </head>
 <body>
-  <h1>ESP32 LED Config Preview</h1>
-  <form id="ledConfigForm">
-    <label>LED count: <input id="ledCount" type="number" value="60"/></label><br>
-    <label>Pin: <input id="ledPin" type="number" value="2"/></label><br>
-    <label>Groups (like 0-9,10-19): <input id="groupDefs" type="text" value="0-9,10-19"/></label><br>
-    <button type="button" onclick="applyConfig()">Apply Config</button>
-  </form>
-  <h2>LED Preview</h2>
-  <div id="leds"></div>
+  <h1>ESP32 LED Config Panel</h1>
+
+  <div class="controls">
+    <button onclick="toggleManual()">Toggle Manual Mode</button>
+    <button onclick="saveConfig()">Save Config</button>
+    <button onclick="fetchConfig()">Refresh</button>
+    <button onclick="addStrip()">Add Strip</button>
+  </div>
+
+  <div id="info"></div>
+
+  <div id="leds" class="led-container"></div>
 
   <script>
-    function applyConfig() {
-      const count = parseInt(document.getElementById("ledCount").value);
-      const leds = document.getElementById("leds");
-      leds.innerHTML = "";
-      for(let i=0; i<count; i++){
-        const led = document.createElement("div");
-        led.className = "led off";
-        led.dataset.index = i;
-        led.onclick = function(){
-          if(led.classList.contains("off")){
-            led.classList.remove("off");
-            led.classList.add("on");
-          } else {
-            led.classList.remove("on");
-            led.classList.add("off");
+    let groups = [];
+    let groupColors = [];
+    let ws;
+    let manualMode = false;
+    let config = {};
+    let totalLeds = 0;
+
+    function randomColor() {
+      return "hsl(" + Math.floor(Math.random()*360) + ",100%,50%)";
+    }
+
+    function connectWS() {
+      ws = new WebSocket("ws://" + location.host + "/ws");
+      ws.onopen = ()=>console.log("WebSocket connected");
+      ws.onmessage = (msg)=>{
+        console.log("WS:", msg.data);
+      };
+      ws.onclose = ()=>setTimeout(connectWS, 2000);
+    }
+
+    function fetchConfig(){
+      fetch('/config.json')
+        .then(r => r.json())
+        .then(cfg => {
+          config = cfg;
+          manualMode = cfg.manualMode;
+          buildGroups(cfg);
+          drawLeds(cfg);
+          connectWS();
+        });
+    }
+
+    function buildGroups(cfg){
+      groups = [];
+      cfg.strips.forEach(strip => {
+        strip.groups.forEach(range => {
+          let out = [];
+          range.split(',').forEach(chunk=>{
+            if (chunk.includes('-')) {
+              let [s,e]=chunk.split('-').map(Number);
+              for(let i=s;i<=e;i++)out.push(i);
+            } else out.push(Number(chunk));
+          });
+          groups.push(out);
+        });
+      });
+      groupColors = groups.map(()=>randomColor());
+      totalLeds = cfg.strips.reduce((acc, s)=>acc+s.ledCount, 0);
+    }
+
+    function drawLeds(cfg) {
+      let info = document.getElementById("info");
+      info.innerHTML = `
+        <p>Strips: ${cfg.strips.length}</p>
+        <p>Manual Mode: ${manualMode}</p>
+        <p>Total LEDs: ${totalLeds}</p>
+      `;
+      let d = document.getElementById("leds");
+      d.innerHTML="";
+      for(let i=0;i<totalLeds;i++){
+        let div = document.createElement("div");
+        div.className = "led";
+        div.textContent = i;  // show LED number
+        if (manualMode) {
+          // manual mode: numbered gray buttons
+          div.style.backgroundColor = "#333";
+          div.onclick=()=>{
+            div.classList.toggle("on");
+            let on = div.classList.contains("on");
+            ws.send(JSON.stringify({led:i,state:on}));
           }
+        } else {
+          // normal mode: group colors
+          let found=false;
+          groups.forEach((g,idx)=>{
+            if(g.includes(i)){
+              div.style.backgroundColor=groupColors[idx];
+              found=true;
+            }
+          });
+          if(!found)div.style.backgroundColor="#222";
+          div.onclick=null;
         }
-        leds.appendChild(led);
+        d.appendChild(div);
       }
     }
-    applyConfig();
+
+    function toggleManual(){
+      manualMode = !manualMode;
+      if(ws) ws.send(JSON.stringify({manual:manualMode}));
+      drawLeds(config); // redraw
+    }
+
+    function saveConfig(){
+      fetch("/save",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify(config)
+      }).then(r=>r.text()).then(alert);
+    }
+
+    function addStrip(){
+      let pin = prompt("GPIO Pin?");
+      let count = prompt("LED count?");
+      if(!pin || !count) return;
+      config.strips.push({
+        pin: parseInt(pin),
+        ledCount: parseInt(count),
+        groups: ["0-"+(count-1)]
+      });
+      saveConfig();
+      fetchConfig();
+    }
+
+    window.onload=fetchConfig;
   </script>
 </body>
 </html>
