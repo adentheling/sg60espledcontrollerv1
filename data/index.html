@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>ESP32 LED Config Preview</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #111; color: #eee; padding: 20px; }
+    .led { display: inline-block; width: 20px; height: 20px; margin: 4px; border-radius: 50%; background: #333; }
+    .led.on { background: lime; }
+    .led.off { background: #222; border: 1px solid #555; }
+  </style>
+</head>
+<body>
+  <h1>ESP32 LED Config Preview</h1>
+  <form id="ledConfigForm">
+    <label>LED count: <input id="ledCount" type="number" value="60"/></label><br>
+    <label>Pin: <input id="ledPin" type="number" value="2"/></label><br>
+    <label>Groups (like 0-9,10-19): <input id="groupDefs" type="text" value="0-9,10-19"/></label><br>
+    <button type="button" onclick="applyConfig()">Apply Config</button>
+  </form>
+  <h2>LED Preview</h2>
+  <div id="leds"></div>
+
+  <script>
+    function applyConfig() {
+      const count = parseInt(document.getElementById("ledCount").value);
+      const leds = document.getElementById("leds");
+      leds.innerHTML = "";
+      for(let i=0; i<count; i++){
+        const led = document.createElement("div");
+        led.className = "led off";
+        led.dataset.index = i;
+        led.onclick = function(){
+          if(led.classList.contains("off")){
+            led.classList.remove("off");
+            led.classList.add("on");
+          } else {
+            led.classList.remove("on");
+            led.classList.add("off");
+          }
+        }
+        leds.appendChild(led);
+      }
+    }
+    applyConfig();
+  </script>
+</body>
+</html>

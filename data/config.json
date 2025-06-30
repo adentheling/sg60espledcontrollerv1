@@ -1,0 +1,15 @@
+{
+  "strips": [
+    {
+      "pin": 2,
+      "ledCount": 60,
+      "groups": ["0-9","10-19","20-29"]
+    },
+    {
+      "pin": 3,
+      "ledCount": 30,
+      "groups": ["0-14","15-29"]
+    }
+  ],
+  "manualMode": false
+}
