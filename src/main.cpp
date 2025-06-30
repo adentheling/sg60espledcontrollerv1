@@ -3,6 +3,7 @@
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include <WiFi.h>
 
 // CONFIG
 #define MAX_STRIPS 4
@@ -21,7 +22,7 @@ StripInfo strips[MAX_STRIPS] = {
 
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
-DynamicJsonDocument configDoc(4096);
+JsonDocument configDoc(4096);  // Changed here
 bool manualMode = false;
 
 void loadConfig() {
@@ -54,13 +55,16 @@ void saveConfig() {
 void handleWsMessage(void *arg, uint8_t *data, size_t len) {
   AwsFrameInfo *info = (AwsFrameInfo*)arg;
   if(info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT){
-    DynamicJsonDocument doc(512);
+    JsonDocument doc(512);  // Changed here
     deserializeJson(doc, (char*)data);
-    if(doc.containsKey("manual")){
+
+    // Use .is<bool>() to check key existence and type
+    if (doc["manual"].is<bool>()) {
       manualMode = doc["manual"];
       Serial.printf("manual mode: %d\n", manualMode);
     }
-    if(doc.containsKey("led")){
+
+    if (doc["led"].is<uint16_t>() && doc["state"].is<bool>()) {
       uint16_t led = doc["led"];
       bool state = doc["state"];
       for(int s=0;s<MAX_STRIPS;s++){
@@ -79,7 +83,7 @@ void setup(){
   if (!LittleFS.begin()) Serial.println("LittleFS problem");
   loadConfig();
 
-  JsonArray js = configDoc["strips"];
+  JsonArray js = configDoc["strips"].as<JsonArray>();  // explicit cast
   int idx=0;
   for(JsonObject s : js){
     int pin = s["pin"];
@@ -92,7 +96,8 @@ void setup(){
     strips[idx].strip.show();
     idx++;
   }
-  manualMode = configDoc["manualMode"];
+
+  manualMode = configDoc["manualMode"].is<bool>() ? configDoc["manualMode"] : false;
 
   server.serveStatic("/",LittleFS,"/").setDefaultFile("index.html");
   server.on("/config.json",HTTP_GET,[](AsyncWebServerRequest *req){
@@ -102,7 +107,7 @@ void setup(){
   });
   server.on("/save",HTTP_POST,[](AsyncWebServerRequest *req){
     if(req->hasParam("plain",true)){
-      DynamicJsonDocument doc(4096);
+      JsonDocument doc(4096);  // Changed here
       deserializeJson(doc, req->arg("plain"));
       configDoc = doc;
       saveConfig();
