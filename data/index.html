@@ -3,142 +3,81 @@
 <head>
   <meta charset="UTF-8" />
   <title>ESP32 LED Controller</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body {
-      font-family: sans-serif;
-      padding: 1em;
-      background: #121212;
-      color: #eee;
-    }
-    button {
-      margin: 3px;
-      border: none;
-      padding: 6px 10px;
-      cursor: pointer;
-      border-radius: 4px;
-    }
-    .led-on {
-      background-color: #00cc44;
-      color: #111;
-    }
-    .led-off {
-      background-color: #555;
-      color: #ccc;
-    }
-    .group {
-      margin-top: 15px;
-      padding: 10px;
-      border: 1px solid #444;
-      border-radius: 6px;
-      background-color: #222;
-    }
-    input[type="range"] {
-      width: 150px;
-    }
-    input[type="text"] {
-      width: 250px;
-      padding: 4px;
-      border-radius: 4px;
-      border: 1px solid #555;
-      background: #333;
-      color: #eee;
-    }
+    body { font-family: sans-serif; background: #222; color: #ddd; padding: 20px; }
+    button { margin: 4px; }
+    .led { width: 20px; height: 20px; display: inline-block; margin: 2px; }
+    .on { background: lime; }
+    .off { background: gray; }
+    .strip { margin-bottom: 20px; border: 1px solid #555; padding: 10px; border-radius: 5px; }
   </style>
 </head>
 <body>
-  <h2>ESP32 LED Controller</h2>
-  <div id="strips"></div>
+  <h1>ESP32 LED Controller</h1>
+  <div id="content">Loading...</div>
+
+  <h2>Add New Strip</h2>
+  <label>Pin: <input type="number" id="addPin" value="2"></label>
+  <label>Num LEDs: <input type="number" id="addNumLeds" value="60"></label>
+  <button onclick="addStrip()">Add Strip</button>
 
   <script>
-    async function fetchState() {
-      const res = await fetch("/state");
+    async function loadState() {
+      const res = await fetch('/state');
       const data = await res.json();
-      renderStrips(data.strips);
-    }
-
-    function renderStrsLEDs(strip, sDiv) {
-      const container = document.createElement("div");
-      container.textContent = "LEDs: ";
-      for (let i = 0; i < strip.numLeds; i++) {
-        const btn = document.createElement("button");
-        btn.id = `led-${strip.id}-${i}`;
-        btn.textContent = i;
-        btn.className = strip.ledStates && strip.ledStates[i] ? "led-on" : "led-off";
-        btn.onclick = () => toggleLed(strip.id, i);
-        container.appendChild(btn);
-      }
-      sDiv.appendChild(container);
-    }
-
-    function renderGroups(strip, sDiv) {
-      const groupsDiv = document.createElement("div");
-      groupsDiv.innerHTML = `<h4>Groups</h4>`;
-      if (!strip.groups || strip.groups.length === 0) {
-        groupsDiv.innerHTML += "<em>No groups</em>";
-      } else {
-        strip.groups.forEach((grp, i) => {
-          groupsDiv.innerHTML += `<div>Group ${i}: ${grp.join(", ")}</div>`;
-        });
-      }
-      sDiv.appendChild(groupsDiv);
-    }
-
-    function renderStrips(strips) {
-      const container = document.getElementById("strips");
-      container.innerHTML = "";
-      strips.forEach((strip) => {
-        const sDiv = document.createElement("div");
-        sDiv.className = "group";
-
-        sDiv.innerHTML = `
-          <h3>Strip on Pin ${strip.pin}</h3>
-          Brightness: <input type="range" min="0" max="255" value="${strip.brightness}" step="1" id="brightness-${strip.id}">
-          Speed: <input type="range" min="0" max="0.02" step="0.001" value="${strip.speed}" id="speed-${strip.id}">
-          <div>
-            <label>Add group (e.g. 1,2,3,10-15): </label>
-            <input type="text" id="groupInput-${strip.id}" placeholder="LEDs to group" />
-            <button id="addGroupBtn-${strip.id}">Add Group</button>
-          </div>
+      const content = document.getElementById('content');
+      content.innerHTML = '';
+      data.strips.forEach(strip => {
+        const div = document.createElement('div');
+        div.className = 'strip';
+        div.innerHTML = `
+          <h3>Strip ${strip.id} (Pin ${strip.pin})</h3>
+          Brightness:
+          <input type="range" min="0" max="255" value="${strip.brightness}" onchange="setBrightness(${strip.id}, this.value)">
+          Speed:
+          <input type="range" min="0" max="0.5" step="0.01" value="${strip.speed}" onchange="setSpeed(${strip.id}, this.value)">
+          <button onclick="removeStrip(${strip.id})">Remove</button>
+          <div id="leds-${strip.id}"></div>
         `;
+        content.appendChild(div);
 
-        container.appendChild(sDiv);
-
-        renderStrsLEDs(strip, sDiv);
-        renderGroups(strip, sDiv);
-
-        document.getElementById(`brightness-${strip.id}`).onchange = (e) =>
-          setBrightness(strip.id, e.target.value);
-        document.getElementById(`speed-${strip.id}`).onchange = (e) =>
-          setSpeed(strip.id, e.target.value);
-        document.getElementById(`addGroupBtn-${strip.id}`).onclick = () => {
-          const val = document.getElementById(`groupInput-${strip.id}`).value;
-          addGroup(strip.id, val);
-        };
+        const ledContainer = div.querySelector(`#leds-${strip.id}`);
+        strip.ledStates.forEach((state, i) => {
+          const led = document.createElement('div');
+          led.className = `led ${state ? 'on' : 'off'}`;
+          led.onclick = () => toggleLED(strip.id, i);
+          ledContainer.appendChild(led);
+        });
       });
     }
 
-    async function toggleLed(strip, led) {
+    async function toggleLED(strip, led) {
       await fetch(`/toggle?strip=${strip}&led=${led}`);
-      fetchState();
+      loadState();
     }
 
-    async function setBrightness(strip, val) {
-      await fetch(`/setBrightness?strip=${strip}&b=${val}`);
+    async function setBrightness(strip, brightness) {
+      await fetch(`/brightness?strip=${strip}&brightness=${brightness}`);
     }
 
-    async function setSpeed(strip, val) {
-      await fetch(`/setSpeed?strip=${strip}&s=${val}`);
+    async function setSpeed(strip, speed) {
+      await fetch(`/speed?strip=${strip}&speed=${speed}`);
     }
 
-    async function addGroup(strip, leds) {
-      if (!leds) return alert("Enter LEDs to group");
-      await fetch(`/addGroup?strip=${strip}&leds=${encodeURIComponent(leds)}`);
-      fetchState();
+    async function addStrip() {
+      const pin = document.getElementById('addPin').value;
+      const numLeds = document.getElementById('addNumLeds').value;
+      await fetch(`/addstrip?pin=${pin}&numLeds=${numLeds}`);
+      loadState();
     }
 
-    fetchState();
-    setInterval(fetchState, 5000);
+    async function removeStrip(strip) {
+      await fetch(`/removestrip?strip=${strip}`);
+      loadState();
+    }
+
+    loadState();
+    setInterval(loadState, 5000);
   </script>
 </body>
 </html>
