@@ -1,5 +1,3 @@
-#include <Arduino.h>
-#include <WiFi.h>
 #include <Adafruit_NeoPixel.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
