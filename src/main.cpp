@@ -4,11 +4,12 @@
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <SPIFFS.h>
-#include <Preferences.h>
+#include <algorithm>    // for std::min
+#include <esp_wifi.h>   // for esp_wifi_set_max_tx_power
 
 #define MAX_STRIPS 4
 #define MAX_LEDS_PER_STRIP 150
-#define MAX_GROUPS_PER_STRIP 10
+#define MAX_GROUPS_PER_STRIP 8
 #define MAX_GROUP_SIZE 50
 
 struct LEDStrip {
@@ -18,26 +19,30 @@ struct LEDStrip {
   uint8_t brightness;
   float speed;
   float phase;
-  bool ledStates[MAX_LEDS_PER_STRIP];
-  uint8_t groups[MAX_GROUPS_PER_STRIP][MAX_GROUP_SIZE];
-  uint8_t groupSizes[MAX_GROUPS_PER_STRIP];
+
+  bool ledStates[MAX_LEDS_PER_STRIP];      // ON/OFF per LED
   uint8_t groupCount;
+  uint8_t groupSizes[MAX_GROUPS_PER_STRIP];
+  uint8_t groups[MAX_GROUPS_PER_STRIP][MAX_GROUP_SIZE];  // LED indices per group
 };
 
 LEDStrip strips[MAX_STRIPS];
 uint8_t stripCount = 0;
 
 AsyncWebServer server(80);
-Preferences preferences;
 
-const char* ssid = "ESP32_LED_Controller";
-const char* password = "12345678";
+const char* ssid = "espled";
+const char* password = "legolego";
 
 void setupWiFi() {
   WiFi.softAP(ssid, password);
   Serial.println("\nWiFi started");
   Serial.print("IP Address: ");
   Serial.println(WiFi.softAPIP());
+
+  // Set Wi-Fi output power to 8.5 dBm (units = 0.25 dBm steps, so 8.5/0.25 = 34)
+  esp_wifi_set_max_tx_power(34);
+  Serial.println("WiFi max TX power set to 8.5 dBm");
 }
 
 bool addStrip(uint8_t pin, uint16_t numLeds) {
@@ -49,64 +54,162 @@ bool addStrip(uint8_t pin, uint16_t numLeds) {
   s.strip->begin();
   s.strip->show();
   s.brightness = 50;
-  s.speed = 0.005;
-  s.phase = 0;
+  s.speed = 0.005f;
+  s.phase = 0.0f;
   s.groupCount = 0;
   for (int i = 0; i < numLeds; i++) s.ledStates[i] = true;
   stripCount++;
   return true;
 }
 
-void saveConfig() {
-  preferences.begin("ledcfg", false);
-  preferences.putUChar("stripCount", stripCount);
+void saveConfigToFile() {
+  DynamicJsonDocument doc(16384);
+
+  JsonArray stripsArr = doc.createNestedArray("strips");
   for (int i = 0; i < stripCount; i++) {
-    String baseKey = "s" + String(i);
-    preferences.putUChar((baseKey + "p").c_str(), strips[i].pin);
-    preferences.putUShort((baseKey + "n").c_str(), strips[i].numLeds);
-    preferences.putUChar((baseKey + "b").c_str(), strips[i].brightness);
-    preferences.putFloat((baseKey + "sp").c_str(), strips[i].speed);
-    preferences.putUChar((baseKey + "gc").c_str(), strips[i].groupCount);
-    preferences.putBytes((baseKey + "leds").c_str(), strips[i].ledStates, strips[i].numLeds);
-    for (int g = 0; g < strips[i].groupCount; g++) {
-      preferences.putUChar((baseKey + "gs" + String(g)).c_str(), strips[i].groupSizes[g]);
-      preferences.putBytes((baseKey + "g" + String(g)).c_str(), strips[i].groups[g], strips[i].groupSizes[g]);
+    LEDStrip &s = strips[i];
+    JsonObject stripObj = stripsArr.createNestedObject();
+
+    stripObj["pin"] = s.pin;
+    stripObj["numLeds"] = s.numLeds;
+    stripObj["brightness"] = s.brightness;
+    stripObj["speed"] = s.speed;
+    stripObj["groupCount"] = s.groupCount;
+
+    JsonArray ledStatesArr = stripObj.createNestedArray("ledStates");
+    for (int j = 0; j < s.numLeds; j++) {
+      ledStatesArr.add(s.ledStates[j]);
+    }
+
+    JsonArray groupsArr = stripObj.createNestedArray("groups");
+    for (int g = 0; g < s.groupCount; g++) {
+      JsonObject groupObj = groupsArr.createNestedObject();
+      groupObj["size"] = s.groupSizes[g];
+      JsonArray ledsArr = groupObj.createNestedArray("leds");
+      for (int k = 0; k < s.groupSizes[g]; k++) {
+        ledsArr.add(s.groups[g][k]);
+      }
     }
   }
-  preferences.end();
-  Serial.println("Config saved");
-}
 
-void loadConfig() {
-  preferences.begin("ledcfg", true);
-  stripCount = preferences.getUChar("stripCount", 0);
-  if (stripCount == 0) {
-    preferences.end();
-    Serial.println("No saved config");
+  File file = SPIFFS.open("/config.json", FILE_WRITE);
+  if (!file) {
+    Serial.println("Failed to open config.json for writing");
     return;
   }
-  for (int i = 0; i < stripCount; i++) {
-    String baseKey = "s" + String(i);
-    uint8_t pin = preferences.getUChar((baseKey + "p").c_str(), 0);
-    uint16_t numLeds = preferences.getUShort((baseKey + "n").c_str(), 0);
-    addStrip(pin, numLeds);  // initializes strip and ledStates = true
-
-    strips[i].brightness = preferences.getUChar((baseKey + "b").c_str(), 50);
-    strips[i].speed = preferences.getFloat((baseKey + "sp").c_str(), 0.005);
-    strips[i].groupCount = preferences.getUChar((baseKey + "gc").c_str(), 0);
-
-    preferences.getBytes((baseKey + "leds").c_str(), strips[i].ledStates, strips[i].numLeds);
-    for (int g = 0; g < strips[i].groupCount; g++) {
-      strips[i].groupSizes[g] = preferences.getUChar((baseKey + "gs" + String(g)).c_str(), 0);
-      preferences.getBytes((baseKey + "g" + String(g)).c_str(), strips[i].groups[g], strips[i].groupSizes[g]);
-    }
-  }
-  preferences.end();
-  Serial.println("Config loaded");
+  serializeJson(doc, file);
+  file.close();
+  Serial.println("Config saved to /config.json");
 }
 
-// Handlers from previous code here...
-// Add saveConfig() calls after any config change (e.g., toggle LED, set brightness/speed, add group)
+void loadConfigFromFile() {
+  if (!SPIFFS.exists("/config.json")) {
+    Serial.println("No config.json found, skipping load");
+    return;
+  }
+  File file = SPIFFS.open("/config.json", FILE_READ);
+  if (!file) {
+    Serial.println("Failed to open config.json for reading");
+    return;
+  }
+
+  size_t size = file.size();
+  if (size > 16384) {
+    Serial.println("Config file too large");
+    file.close();
+    return;
+  }
+
+  std::unique_ptr<char[]> buf(new char[size + 1]);
+  file.readBytes(buf.get(), size);
+  buf[size] = 0;
+  file.close();
+
+  DynamicJsonDocument doc(16384);
+  auto err = deserializeJson(doc, buf.get());
+  if (err) {
+    Serial.println("Failed to parse config.json");
+    return;
+  }
+
+  JsonArray stripsArr = doc["strips"].as<JsonArray>();
+  stripCount = 0;
+  for (JsonObject stripObj : stripsArr) {
+    uint8_t pin = stripObj["pin"];
+    uint16_t numLeds = stripObj["numLeds"];
+
+    if (!addStrip(pin, numLeds)) {
+      Serial.printf("Failed to add strip for pin %d\n", pin);
+      continue;
+    }
+
+    LEDStrip &s = strips[stripCount - 1];
+    s.brightness = stripObj["brightness"] | 50;
+    s.speed = stripObj["speed"] | 0.005f;
+    s.groupCount = stripObj["groupCount"] | 0;
+
+    JsonArray ledStatesArr = stripObj["ledStates"].as<JsonArray>();
+    size_t countStates = std::min(ledStatesArr.size(), static_cast<size_t>(s.numLeds));
+    for (size_t i = 0; i < countStates; i++) {
+      s.ledStates[i] = ledStatesArr[i];
+    }
+    for (size_t i = countStates; i < s.numLeds; i++) {
+      s.ledStates[i] = true; // default on
+    }
+
+    JsonArray groupsArr = stripObj["groups"].as<JsonArray>();
+    for (int g = 0; g < s.groupCount && g < groupsArr.size(); g++) {
+      JsonObject groupObj = groupsArr[g];
+      s.groupSizes[g] = groupObj["size"] | 0;
+      JsonArray ledsArr = groupObj["leds"].as<JsonArray>();
+      for (int k = 0; k < s.groupSizes[g] && k < ledsArr.size(); k++) {
+        s.groups[g][k] = ledsArr[k];
+      }
+    }
+  }
+  Serial.println("Config loaded from /config.json");
+}
+
+// Web Handlers
+
+void handleRoot(AsyncWebServerRequest *request) {
+  request->send(SPIFFS, "/index.html", "text/html");
+}
+
+void handleState(AsyncWebServerRequest *request) {
+  DynamicJsonDocument doc(16384);
+  JsonArray stripsArr = doc.createNestedArray("strips");
+  for (int i = 0; i < stripCount; i++) {
+    LEDStrip &s = strips[i];
+    JsonObject stripObj = stripsArr.createNestedObject();
+
+    stripObj["id"] = i;
+    stripObj["pin"] = s.pin;
+    stripObj["numLeds"] = s.numLeds;
+    stripObj["brightness"] = s.brightness;
+    stripObj["speed"] = s.speed;
+    stripObj["groupCount"] = s.groupCount;
+
+    JsonArray ledStatesArr = stripObj.createNestedArray("ledStates");
+    for (int j = 0; j < s.numLeds; j++) {
+      ledStatesArr.add(s.ledStates[j]);
+    }
+
+    JsonArray groupsArr = stripObj.createNestedArray("groups");
+    for (int g = 0; g < s.groupCount; g++) {
+      JsonObject groupObj = groupsArr.createNestedObject();
+      groupObj["size"] = s.groupSizes[g];
+      JsonArray ledsArr = groupObj.createNestedArray("leds");
+      for (int k = 0; k < s.groupSizes[g]; k++) {
+        ledsArr.add(s.groups[g][k]);
+      }
+    }
+  }
+
+  String json;
+  serializeJson(doc, json);
+  request->send(200, "application/json", json);
+}
 
 void handleToggleLED(AsyncWebServerRequest *request) {
   if (!request->hasParam("strip") || !request->hasParam("led")) {
@@ -120,118 +223,120 @@ void handleToggleLED(AsyncWebServerRequest *request) {
     return;
   }
   strips[stripId].ledStates[led] = !strips[stripId].ledStates[led];
-  saveConfig();
+  saveConfigToFile();
   request->send(200, "text/plain", strips[stripId].ledStates[led] ? "ON" : "OFF");
 }
 
 void handleSetBrightness(AsyncWebServerRequest *request) {
-  if (!request->hasParam("strip") || !request->hasParam("b")) {
+  if (!request->hasParam("strip") || !request->hasParam("brightness")) {
     request->send(400, "text/plain", "Missing parameters");
     return;
   }
   int stripId = request->getParam("strip")->value().toInt();
-  int b = request->getParam("b")->value().toInt();
-  if (stripId >= 0 && stripId < stripCount) {
-    strips[stripId].brightness = b;
-    saveConfig();
-    request->send(200, "text/plain", "OK");
-  } else {
-    request->send(400, "text/plain", "Invalid strip");
+  int b = request->getParam("brightness")->value().toInt();
+  if (stripId < 0 || stripId >= stripCount || b < 0 || b > 255) {
+    request->send(400, "text/plain", "Invalid brightness or strip");
+    return;
   }
+  strips[stripId].brightness = b;
+  saveConfigToFile();
+  request->send(200, "text/plain", "OK");
 }
 
 void handleSetSpeed(AsyncWebServerRequest *request) {
-  if (!request->hasParam("strip") || !request->hasParam("s")) {
+  if (!request->hasParam("strip") || !request->hasParam("speed")) {
     request->send(400, "text/plain", "Missing parameters");
     return;
   }
   int stripId = request->getParam("strip")->value().toInt();
-  float s = request->getParam("s")->value().toFloat();
-  if (stripId >= 0 && stripId < stripCount) {
-    strips[stripId].speed = s;
-    saveConfig();
-    request->send(200, "text/plain", "OK");
+  float spd = request->getParam("speed")->value().toFloat();
+  if (stripId < 0 || stripId >= stripCount || spd < 0 || spd > 0.5f) {
+    request->send(400, "text/plain", "Invalid speed or strip");
+    return;
+  }
+  strips[stripId].speed = spd;
+  saveConfigToFile();
+  request->send(200, "text/plain", "OK");
+}
+
+void handleAddStrip(AsyncWebServerRequest *request) {
+  if (!request->hasParam("pin") || !request->hasParam("numLeds")) {
+    request->send(400, "text/plain", "Missing parameters");
+    return;
+  }
+  int pin = request->getParam("pin")->value().toInt();
+  int numLeds = request->getParam("numLeds")->value().toInt();
+  if (numLeds <= 0 || numLeds > MAX_LEDS_PER_STRIP || stripCount >= MAX_STRIPS) {
+    request->send(400, "text/plain", "Invalid parameters or max strips reached");
+    return;
+  }
+  if (addStrip(pin, numLeds)) {
+    saveConfigToFile();
+    request->send(200, "text/plain", "Strip added");
   } else {
-    request->send(400, "text/plain", "Invalid strip");
+    request->send(500, "text/plain", "Failed to add strip");
   }
 }
 
-void handleAddGroup(AsyncWebServerRequest *request) {
-  if (!request->hasParam("strip") || !request->hasParam("leds")) {
-    request->send(400, "text/plain", "Missing parameters");
+void handleRemoveStrip(AsyncWebServerRequest *request) {
+  if (!request->hasParam("strip")) {
+    request->send(400, "text/plain", "Missing parameter");
     return;
   }
   int stripId = request->getParam("strip")->value().toInt();
-  String ledList = request->getParam("leds")->value();
-
-  if (stripId < 0 || stripId >= stripCount || strips[stripId].groupCount >= MAX_GROUPS_PER_STRIP) {
-    request->send(400, "text/plain", "Invalid strip or max groups reached");
+  if (stripId < 0 || stripId >= stripCount) {
+    request->send(400, "text/plain", "Invalid strip");
     return;
   }
 
-  int groupId = strips[stripId].groupCount;
-  strips[stripId].groupSizes[groupId] = 0;
-  int idx = 0;
-  ledList.replace(" ", "");
-  while (ledList.length() > 0 && idx < MAX_GROUP_SIZE) {
-    int comma = ledList.indexOf(',');
-    String token = (comma >= 0) ? ledList.substring(0, comma) : ledList;
-    int dash = token.indexOf('-');
-    if (dash >= 0) {
-      int start = token.substring(0, dash).toInt();
-      int end = token.substring(dash + 1).toInt();
-      for (int i = start; i <= end && idx < MAX_GROUP_SIZE; i++) {
-        if (i < strips[stripId].numLeds) {
-          strips[stripId].groups[groupId][idx++] = i;
-        }
-      }
-    } else {
-      int val = token.toInt();
-      if (val < strips[stripId].numLeds) {
-        strips[stripId].groups[groupId][idx++] = val;
-      }
-    }
-    if (comma >= 0) ledList = ledList.substring(comma + 1);
-    else break;
+  delete strips[stripId].strip;
+
+  // Shift remaining strips down
+  for (int i = stripId; i < stripCount - 1; i++) {
+    strips[i] = strips[i + 1];
   }
-  strips[stripId].groupSizes[groupId] = idx;
-  strips[stripId].groupCount++;
-  saveConfig();
-  request->send(200, "text/plain", "Group added");
+  stripCount--;
+  saveConfigToFile();
+  request->send(200, "text/plain", "Strip removed");
 }
 
 void setup() {
   Serial.begin(115200);
-  SPIFFS.begin(true);
-  setupWiFi();
+  delay(1000);
 
-  loadConfig();  // load saved config, or nothing if first time
-
-  // If no saved config, add example strips:
-  if (stripCount == 0) {
-    addStrip(2, 60);
-    addStrip(3, 30);
-    saveConfig();
+  if (!SPIFFS.begin(true)) {
+    Serial.println("SPIFFS Mount Failed");
+    while (1);
   }
 
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(SPIFFS, "/index.html", "text/html");
-  });
+  setupWiFi();
+
+  loadConfigFromFile();
+
+  // If no strips, create a default strip for demo
+  if (stripCount == 0) {
+    addStrip(2, 60);
+    saveConfigToFile();
+  }
+
+  server.on("/", HTTP_GET, handleRoot);
   server.on("/state", HTTP_GET, handleState);
   server.on("/toggle", HTTP_GET, handleToggleLED);
-  server.on("/setBrightness", HTTP_GET, handleSetBrightness);
-  server.on("/setSpeed", HTTP_GET, handleSetSpeed);
-  server.on("/addGroup", HTTP_GET, handleAddGroup);
+  server.on("/brightness", HTTP_GET, handleSetBrightness);
+  server.on("/speed", HTTP_GET, handleSetSpeed);
+  server.on("/addstrip", HTTP_GET, handleAddStrip);
+  server.on("/removestrip", HTTP_GET, handleRemoveStrip);
   server.serveStatic("/", SPIFFS, "/");
 
   server.begin();
+  Serial.println("Server started");
 }
 
 void loop() {
   for (int s = 0; s < stripCount; s++) {
     LEDStrip &strip = strips[s];
     strip.phase += strip.speed;
-    if (strip.phase > 1.0) strip.phase -= 1.0;
+    if (strip.phase > 1.0f) strip.phase -= 1.0f;
 
     uint16_t hue = strip.phase * 65535;
     uint32_t color = Adafruit_NeoPixel::ColorHSV(hue, 255, 255);
@@ -252,5 +357,5 @@ void loop() {
     }
     strip.strip->show();
   }
-  delay(10);
+  delay(20);
 }
