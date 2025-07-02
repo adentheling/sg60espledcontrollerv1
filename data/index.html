@@ -1,83 +1,81 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="UTF-8" />
-  <title>ESP32 LED Controller</title>
+  <meta charset="UTF-8">
+  <title>ESP LED Controller</title>
   <style>
-    body { font-family: sans-serif; background: #222; color: #ddd; padding: 20px; }
-    button { margin: 4px; }
-    .led { width: 20px; height: 20px; display: inline-block; margin: 2px; }
-    .on { background: lime; }
-    .off { background: gray; }
-    .strip { margin-bottom: 20px; border: 1px solid #555; padding: 10px; border-radius: 5px; }
+    body { font-family: Arial, sans-serif; background:#121212; color:white; margin:20px; }
+    h1 { color: #4CAF50; }
+    .section { background:#1e1e1e; padding:15px; border-radius:10px; margin-bottom:15px; }
+    label { display:block; margin-top:10px; }
+    input, select, button { margin-top:5px; margin-bottom:10px; width:100%; }
+    .led-button { display:inline-block; margin:4px; padding:10px; background:#333; border-radius:5px; color:white; }
+    .led-off { background:red; }
   </style>
 </head>
 <body>
-  <h1>ESP32 LED Controller</h1>
-  <div id="content">Loading...</div>
-
-  <h2>Add New Strip</h2>
-  <label>Pin: <input type="number" id="addPin" value="2"></label>
-  <label>Num LEDs: <input type="number" id="addNumLeds" value="60"></label>
-  <button onclick="addStrip()">Add Strip</button>
-
+  <h1>ESP LED Controller</h1>
+  <div class="section">
+    <h2>Status LED</h2>
+    <label>Brightness:</label>
+    <input type="range" min="0" max="255" id="statusLedBrightness">
+  </div>
+  <div class="section">
+    <h2>Strips</h2>
+    <label>LEDs on Pin 3</label>
+    <input type="number" min="1" max="200" id="numLedsPin3">
+    <label>LEDs on Pin 10</label>
+    <input type="number" min="1" max="200" id="numLedsPin10">
+  </div>
+  <div class="section">
+    <h2>Modes</h2>
+    <label>Manual Mode:</label>
+    <input type="checkbox" id="manualMode">
+    <label>Random Mode:</label>
+    <input type="checkbox" id="randomMode">
+    <label>Randomize Interval (minutes):</label>
+    <input type="number" id="randomizeInterval" min="1" max="60">
+    <label>Select Mode:</label>
+    <select id="modeSelect">
+      <option value="0">RGB Cycle</option>
+      <option value="1">Running Lights</option>
+      <option value="2">Segment Colors</option>
+      <option value="3">Manual Color</option>
+    </select>
+    <button id="applyBtn">Apply Changes</button>
+  </div>
   <script>
-    async function loadState() {
-      const res = await fetch('/state');
-      const data = await res.json();
-      const content = document.getElementById('content');
-      content.innerHTML = '';
-      data.strips.forEach(strip => {
-        const div = document.createElement('div');
-        div.className = 'strip';
-        div.innerHTML = `
-          <h3>Strip ${strip.id} (Pin ${strip.pin})</h3>
-          Brightness:
-          <input type="range" min="0" max="255" value="${strip.brightness}" onchange="setBrightness(${strip.id}, this.value)">
-          Speed:
-          <input type="range" min="0" max="0.5" step="0.01" value="${strip.speed}" onchange="setSpeed(${strip.id}, this.value)">
-          <button onclick="removeStrip(${strip.id})">Remove</button>
-          <div id="leds-${strip.id}"></div>
-        `;
-        content.appendChild(div);
-
-        const ledContainer = div.querySelector(`#leds-${strip.id}`);
-        strip.ledStates.forEach((state, i) => {
-          const led = document.createElement('div');
-          led.className = `led ${state ? 'on' : 'off'}`;
-          led.onclick = () => toggleLED(strip.id, i);
-          ledContainer.appendChild(led);
-        });
+    function loadConfig(){
+      fetch("/state").then(res => res.json()).then(cfg => {
+        document.getElementById("statusLedBrightness").value = cfg.statusLedBrightness;
+        document.getElementById("numLedsPin3").value = cfg.strips[0].numLeds;
+        document.getElementById("numLedsPin10").value = cfg.strips[1].numLeds;
+        document.getElementById("manualMode").checked = cfg.manualMode;
+        document.getElementById("randomMode").checked = cfg.randomMode;
+        document.getElementById("randomizeInterval").value = cfg.randomizeInterval;
+        document.getElementById("modeSelect").value = cfg.strips[0].mode;
       });
     }
-
-    async function toggleLED(strip, led) {
-      await fetch(`/toggle?strip=${strip}&led=${led}`);
-      loadState();
-    }
-
-    async function setBrightness(strip, brightness) {
-      await fetch(`/brightness?strip=${strip}&brightness=${brightness}`);
-    }
-
-    async function setSpeed(strip, speed) {
-      await fetch(`/speed?strip=${strip}&speed=${speed}`);
-    }
-
-    async function addStrip() {
-      const pin = document.getElementById('addPin').value;
-      const numLeds = document.getElementById('addNumLeds').value;
-      await fetch(`/addstrip?pin=${pin}&numLeds=${numLeds}`);
-      loadState();
-    }
-
-    async function removeStrip(strip) {
-      await fetch(`/removestrip?strip=${strip}`);
-      loadState();
-    }
-
-    loadState();
-    setInterval(loadState, 5000);
+    document.getElementById("applyBtn").addEventListener("click", ()=>{
+      const data = {
+        statusLedBrightness: document.getElementById("statusLedBrightness").value,
+        numLedsPin3: document.getElementById("numLedsPin3").value,
+        numLedsPin10: document.getElementById("numLedsPin10").value,
+        manualMode: document.getElementById("manualMode").checked,
+        randomMode: document.getElementById("randomMode").checked,
+        randomizeInterval: document.getElementById("randomizeInterval").value,
+        selectedMode: document.getElementById("modeSelect").value
+      };
+      fetch("/update", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify(data)
+      }).then(() => {
+        alert("Changes applied!");
+        location.reload();
+      });
+    });
+    loadConfig();
   </script>
 </body>
 </html>
