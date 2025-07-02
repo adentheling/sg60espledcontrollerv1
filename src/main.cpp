@@ -2,221 +2,149 @@
 #include <WiFi.h>
 #include <Adafruit_NeoPixel.h>
 #include <ESPAsyncWebServer.h>
-#include <ArduinoJson.h>
 #include <SPIFFS.h>
+#include <ArduinoJson.h>
 #include <esp_wifi.h>
 
-// =================== CONFIG ===================
+// CONFIG
 #define STATUS_LED_PIN 48
 #define LED_STRIP_1_PIN 3
 #define LED_STRIP_2_PIN 10
-
 #define MAX_LEDS_PER_STRIP 200
-#define JSON_BUFFER_SIZE 16384
+#define JSON_BUFFER_SIZE 8192
 
-// =================== STRUCTS ===================
+// WIFI
+const char* ssid = "espleds";
+const char* password = "legoledcontroller";
+
+// Global
+Adafruit_NeoPixel* statusLed;
+Adafruit_NeoPixel* strips[2];
+AsyncWebServer server(80);
+
+// Config struct
 struct StripConfig {
-  uint16_t numLeds;
-  uint8_t brightness;
-  float speed;
-  uint8_t mode;
-  bool ledStates[MAX_LEDS_PER_STRIP];
+  uint16_t numLeds = 60;
+  uint8_t brightness = 100;
+  float speed = 0.01;
+  uint8_t mode = 0;
 };
 
 struct GlobalConfig {
   StripConfig strips[2];
-  bool randomize;
-  uint16_t randomizeInterval;
-  bool randomizeModes[4]; // up to 4 modes
-  uint8_t statusLedBrightness;
-  bool manualMode;
-  uint8_t selectedMode;
-};
+  uint8_t statusLedBrightness = 255;
+  bool manualMode = false;
+} config;
 
-GlobalConfig config;
+volatile bool gotRequest = false;
 
-Adafruit_NeoPixel* strips[2];
-AsyncWebServer server(80);
-
-const char* ssid = "espleds";
-const char* password = "legoledcontroller";
-
-// =================== STATUS LED ===================
 void setStatusLED(uint8_t r, uint8_t g, uint8_t b) {
-  // control status LED brightness using PWM on channel 0
-  const int statusLedChannel = 0;
-  ledcAttachPin(STATUS_LED_PIN, statusLedChannel);
-  ledcSetup(statusLedChannel, 5000, 8);
-  uint8_t v = max(max(r, g), b);
-  v = (v * config.statusLedBrightness) / 255;
-  ledcWrite(statusLedChannel, v);
-}
-
-// =================== JSON SAVE/LOAD ===================
-void saveConfig() {
-  DynamicJsonDocument doc(JSON_BUFFER_SIZE);
-  for (int i = 0; i < 2; i++) {
-    doc["strips"][i]["numLeds"] = config.strips[i].numLeds;
-    doc["strips"][i]["brightness"] = config.strips[i].brightness;
-    doc["strips"][i]["speed"] = config.strips[i].speed;
-    doc["strips"][i]["mode"] = config.strips[i].mode;
-    JsonArray states = doc["strips"][i].createNestedArray("ledStates");
-    for (int j = 0; j < config.strips[i].numLeds; j++)
-      states.add(config.strips[i].ledStates[j]);
-  }
-  doc["randomize"] = config.randomize;
-  doc["randomizeInterval"] = config.randomizeInterval;
-  JsonArray modes = doc.createNestedArray("randomizeModes");
-  for (int i = 0; i < 4; i++)
-    modes.add(config.randomizeModes[i]);
-  doc["statusLedBrightness"] = config.statusLedBrightness;
-  doc["manualMode"] = config.manualMode;
-  doc["selectedMode"] = config.selectedMode;
-
-  File file = SPIFFS.open("/config.json", "w");
-  if (file) {
-    serializeJson(doc, file);
-    file.close();
-    Serial.println("Config saved.");
+  if (statusLed) {
+    uint8_t scaled_r = (r * config.statusLedBrightness) / 255;
+    uint8_t scaled_g = (g * config.statusLedBrightness) / 255;
+    uint8_t scaled_b = (b * config.statusLedBrightness) / 255;
+    statusLed->setPixelColor(0, scaled_r, scaled_g, scaled_b);
+    statusLed->show();
   }
 }
 
-void loadConfig() {
-  if (!SPIFFS.exists("/config.json")) {
-    Serial.println("No config.json, using defaults");
-    return;
-  }
-  File file = SPIFFS.open("/config.json");
-  if (file) {
-    DynamicJsonDocument doc(JSON_BUFFER_SIZE);
-    DeserializationError e = deserializeJson(doc, file);
-    if (!e) {
-      for (int i = 0; i < 2; i++) {
-        config.strips[i].numLeds = doc["strips"][i]["numLeds"] | 60;
-        config.strips[i].brightness = doc["strips"][i]["brightness"] | 100;
-        config.strips[i].speed = doc["strips"][i]["speed"] | 0.01;
-        config.strips[i].mode = doc["strips"][i]["mode"] | 0;
-        JsonArray states = doc["strips"][i]["ledStates"];
-        for (int j = 0; j < states.size() && j < MAX_LEDS_PER_STRIP; j++)
-          config.strips[i].ledStates[j] = states[j];
-      }
-      config.randomize = doc["randomize"] | false;
-      config.randomizeInterval = doc["randomizeInterval"] | 5;
-      JsonArray modes = doc["randomizeModes"];
-      for (int i = 0; i < 4; i++)
-        config.randomizeModes[i] = modes[i] | true;
-      config.statusLedBrightness = doc["statusLedBrightness"] | 255;
-      config.manualMode = doc["manualMode"] | false;
-      config.selectedMode = doc["selectedMode"] | 0;
-    }
-    file.close();
+void initStrips() {
+  for (int i=0;i<2;i++) {
+    if (strips[i]) delete strips[i];
+    strips[i] = new Adafruit_NeoPixel(config.strips[i].numLeds, i==0?LED_STRIP_1_PIN:LED_STRIP_2_PIN, NEO_GRB + NEO_KHZ800);
+    strips[i]->begin();
+    strips[i]->setBrightness(config.strips[i].brightness);
+    strips[i]->show();
   }
 }
 
-// =================== SETUP ===================
 void setup() {
   Serial.begin(115200);
-  SPIFFS.begin(true);
 
-  // status LED setup
-  ledcSetup(0, 5000, 8);
-  ledcAttachPin(STATUS_LED_PIN, 0);
-  ledcWrite(0, 0);
-  setStatusLED(255, 0, 0); // boot = red
+  if(!SPIFFS.begin(true)){
+    Serial.println("SPIFFS fail");
+    while(1);
+  }
 
-  // defaults
-  config.strips[0].mode = 0;
-  config.strips[1].mode = 0;
+  statusLed = new Adafruit_NeoPixel(1, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
+  statusLed->begin();
+  statusLed->show();
+  setStatusLED(255,0,0); // boot red
+
+  initStrips();
 
   // WiFi
-  IPAddress local_IP(192, 168, 4, 10);
-  IPAddress gateway(192, 168, 4, 10);
-  IPAddress subnet(255, 255, 255, 0);
-
-  WiFi.softAPConfig(local_IP, gateway, subnet);
-  WiFi.softAP(ssid, password);
+  IPAddress ip(192,168,4,10);
+  WiFi.softAPConfig(ip,ip,IPAddress(255,255,255,0));
+  WiFi.softAP(ssid,password);
   esp_wifi_set_max_tx_power(34);
+  setStatusLED(0,0,255); // blue wifi up
 
-  setStatusLED(0, 0, 255); // blue = wifi up
-
-  loadConfig();
-
-  strips[0] = new Adafruit_NeoPixel(config.strips[0].numLeds, LED_STRIP_1_PIN, NEO_GRB + NEO_KHZ800);
-  strips[1] = new Adafruit_NeoPixel(config.strips[1].numLeds, LED_STRIP_2_PIN, NEO_GRB + NEO_KHZ800);
-  strips[0]->begin();
-  strips[1]->begin();
-  strips[0]->show();
-  strips[1]->show();
-
-  // serve index
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(SPIFFS, "/index.html", "text/html");
+  // serve index.html
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    File file = SPIFFS.open("/index.html");
+    if (!file) {
+      setStatusLED(255,0,255); // pink = missing
+      request->send(404,"text/plain","index.html missing");
+    } else {
+      setStatusLED(255,255,0); // yellow = file found
+      request->send(file,"text/html");
+    }
+    gotRequest=true;
   });
 
-  // JSON update handler
-  server.on("/update", HTTP_POST, [](AsyncWebServerRequest *request){},
-    NULL,
-    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-      DynamicJsonDocument doc(JSON_BUFFER_SIZE);
-      DeserializationError error = deserializeJson(doc, data, len);
-      if (!error) {
-        JsonObject json = doc.as<JsonObject>();
-        config.statusLedBrightness = json["statusLedBrightness"] | config.statusLedBrightness;
-        config.strips[0].numLeds = json["numLedsPin3"] | config.strips[0].numLeds;
-        config.strips[1].numLeds = json["numLedsPin10"] | config.strips[1].numLeds;
-        config.manualMode = json["manualMode"] | config.manualMode;
-        config.randomize = json["randomMode"] | config.randomize;
-        config.randomizeInterval = json["randomizeInterval"] | config.randomizeInterval;
-        config.selectedMode = json["selectedMode"] | config.selectedMode;
-
-        saveConfig();
-        request->send(200, "text/plain", "OK");
-      } else {
-        request->send(400, "text/plain", "Invalid JSON");
-      }
-    }
-  );
-
+  // config
+  server.on("/config.json", HTTP_GET, [](AsyncWebServerRequest *request){
+    DynamicJsonDocument doc(512);
+    doc["statusLedBrightness"] = config.statusLedBrightness;
+    doc["numLeds1"] = config.strips[0].numLeds;
+    doc["numLeds2"] = config.strips[1].numLeds;
+    request->send(200,"application/json",String("{\"ok\":true}"));
+    gotRequest=true;
+  });
 
   server.begin();
   Serial.println("Server started at 192.168.4.10");
 }
 
-uint32_t frameCount = 0;
+uint32_t frameCount=0;
+uint32_t lastRequestCheck=0;
 
 void loop() {
   frameCount++;
-  static bool blinkState = false;
 
   int clients = WiFi.softAPgetStationNum();
-  if (clients == 0) {
-    setStatusLED(0, 0, 255); // blue
-  } else if (clients == 1) {
-    setStatusLED(0, 255, 0); // green
-  } else if (clients > 1) {
-    if (frameCount % 50 == 0) blinkState = !blinkState;
-    setStatusLED(0, blinkState ? 255 : 0, 0);
+  static bool blinkState=false;
+
+  if (clients==0) {
+    setStatusLED(0,0,255); // blue
+  } else if (clients==1) {
+    setStatusLED(0,255,0); // green
+  } else {
+    if(frameCount%50==0) blinkState=!blinkState;
+    setStatusLED(255, blinkState?255:0,0); // blink red
   }
 
-  for (int s = 0; s < 2; s++) {
-    auto &strip = strips[s];
-    auto &conf = config.strips[s];
-
-    switch (conf.mode) {
-      case 0: { // RGB cycle
-        static float phase = 0;
-        phase += conf.speed;
-        if (phase > 1.0) phase -= 1.0;
-        uint16_t hue = phase * 65535;
-        uint32_t color = Adafruit_NeoPixel::ColorHSV(hue, 255, 255);
-        for (int i = 0; i < conf.numLeds; i++)
-          strip->setPixelColor(i, color);
-        strip->setBrightness(conf.brightness);
-        strip->show();
-        break;
-      }
-      // you can expand other patterns here
+  if(millis()-lastRequestCheck>5000){
+    if(!gotRequest){
+      static bool fastBlink=false;
+      fastBlink=!fastBlink;
+      setStatusLED(fastBlink?255:0,0,0); // fast red
     }
+    gotRequest=false;
+    lastRequestCheck=millis();
+  }
+
+  // run default RGB cycle
+  for(int s=0;s<2;s++){
+    static float phase[2]={0,0};
+    phase[s]+=config.strips[s].speed;
+    if(phase[s]>1.0) phase[s]-=1.0;
+    uint16_t hue = phase[s]*65535;
+    uint32_t c = Adafruit_NeoPixel::ColorHSV(hue,255,255);
+    for(int i=0;i<config.strips[s].numLeds;i++)
+      strips[s]->setPixelColor(i,c);
+    strips[s]->show();
   }
 
   delay(20);
